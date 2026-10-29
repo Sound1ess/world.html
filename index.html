@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Кубические миры</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;font-family:monospace}
+  canvas{width:100%;height:100%;image-rendering:pixelated;display:block}
+  #ui{position:fixed;left:0;right:0;bottom:24px;display:flex;justify-content:center;align-items:center;gap:16px;pointer-events:none}
+  button{pointer-events:auto;background:#1b1b3a;color:#fff;border:3px solid #6c6cff;font:bold 22px monospace;width:56px;height:56px;cursor:pointer}
+  button:active{background:#33336a}
+  #name{color:#fff;font-size:20px;min-width:200px;text-align:center;text-shadow:2px 2px #000;
+        background:#0008;padding:10px 12px;border:3px solid #444}
+  #hint{position:fixed;top:12px;width:100%;text-align:center;color:#888;font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Крути мир пальцем · свайп или кнопки — другой мир</div>
+<div id="ui"><button id="prev">◀</button><div id="name"></div><button id="next">▶</button></div>
+<script>
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const PX=4;               // размер «пикселя»
+const N=32;               // разрешение текстуры грани
+let W,H,img,buf,stars=[];
+
+function resize(){
+  W=Math.ceil(innerWidth/PX); H=Math.ceil(innerHeight/PX);
+  cv.width=W; cv.height=H;
+  img=ctx.createImageData(W,H); buf=img.data;
+  stars=[];
+  for(let i=0;i<W*H/60;i++)stars.push({x:Math.random()*W|0,y:Math.random()*H|0,p:Math.random()*6,b:Math.random()});
+}
+addEventListener('resize',resize); resize();
+
+// ---------- шум ----------
+function hash(x,y,s){
+  let h=Math.imul(x,374761393)+Math.imul(y,668265263)+Math.imul(s,982451653);
+  h=Math.imul(h^(h>>>13),1274126177); return ((h^(h>>>16))>>>0)/4294967295;
+}
+function vnoise(x,y,s){
+  const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi;
+  const u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf);
+  const a=hash(xi,yi,s),b=hash(xi+1,yi,s),c=hash(xi,yi+1,s),d=hash(xi+1,yi+1,s);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;
+}
+function fbm(x,y,s){return vnoise(x,y,s)*.6+vnoise(x*2,y*2,s+7)*.28+vnoise(x*4,y*4,s+13)*.12;}
+
+// ---------- миры ----------
+// type: 0 = суша, 1 = жидкость (анимируется), 2 = препятствие
+const worlds=[
+ {name:'🌲 Лесной мир',seed:1,
+  tile(n,h){
+    if(n<.38)return[[30,70+n*150|0,170],1];
+    if(n<.43)return[[220,200,130],0];
+    if(n<.68)return[[60+h*30|0,150+h*40|0,60],0];
+    return[[20,90+h*30|0,40],2];
+  },
+  side:[[70,160,60],[120,80,40],[100,100,110]],
+  fauna:[{c:[150,90,40],n:7,on:0},{c:[255,255,255],n:6,on:0}]},
+ {name:'🏜 Пустынный мир',seed:2,
+  tile(n,h){
+    if(n<.3)return[[40,140,200],1];
+    if(n<.34)return[[60,170,70],0];
+    if(h>.97)return[[40,150,50],2]; // кактус
+    if(n<.72)return[[230,190+h*30|0,110],0];
+    return[[170,110,70],2];
+  },
+  side:[[230,200,120],[200,140,80],[150,90,60]],
+  fauna:[{c:[180,130,70],n:4,on:0},{c:[40,20,20],n:6,on:0}]},
+ {name:'❄ Ледяной мир',seed:3,
+  tile(n,h){
+    if(n<.36)return[[20,50,110],1];
+    if(n<.42)return[[160,210,240],0];
+    if(n<.75)return[[230+h*25|0,240,255],0];
+    return[[140,160,190],2];
+  },
+  side:[[240,250,255],[150,190,230],[90,100,130]],
+  fauna:[{c:[20,20,30],n:8,on:0},{c:[255,160,40],n:3,on:0}]},
+ {name:'🌋 Вулканический мир',seed:4,
+  tile(n,h){
+    if(n<.38)return[[255,90+n*200|0,20],1];
+    if(n<.45)return[[90,40,30],0];
+    if(n<.78)return[[50+h*20|0,45,50],0];
+    return[[25,20,25],2];
+  },
+  side:[[60,50,55],[110,40,30],[230,80,20]],
+  fauna:[{c:[255,230,60],n:6,on:0},{c:[200,30,30],n:4,on:0}]},
+ {name:'🌊 Океанский мир',seed:5,
+  tile(n,h){
+    if(n<.62)return[[20,60+n*160|0,160+n*80|0],1];
+    if(n<.67)return[[230,210,140],0];
+    return[[50,170,80],0];
+  },
+  side:[[40,120,200],[30,80,160],[20,40,100]],
+  fauna:[{c:[255,140,0],n:8,on:1},{c:[200,220,255],n:3,on:1},{c:[230,60,60],n:3,on:0}]},
+];
+
+// строим карту верхней грани и животных
+function build(w){
+  w.map=[];w.type=[];
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){
+    const n=fbm(x/8,y/8,w.seed), h=hash(x,y,w.seed+99);
+    const [c,t]=w.tile(n,h); w.map.push(c); w.type.push(t);
+  }
+  w.animals=[];
+  w.fauna.forEach(f=>{
+    for(let i=0;i<f.n;i++){
+      for(let k=0;k<200;k++){
+        const x=Math.random()*N|0,y=Math.random()*N|0;
+        if(w.type[y*N+x]===f.on){w.animals.push({x,y,c:f.c,on:f.on,t:Math.random()*30|0});break;}
+      }
+    }
+  });
+}
+worlds.forEach(build);
+
+let cur=0, tex=new Array(N*N);
+function updateTop(w,time){
+  for(let i=0;i<N*N;i++){
+    const c=w.map[i];
+    if(w.type[i]===1){
+      const s=1+.15*Math.sin(time*2+(i%N)*.7+(i/N|0)*.5);
+      tex[i]=[Math.min(255,c[0]*s),Math.min(255,c[1]*s),Math.min(255,c[2]*s)];
+    } else tex[i]=c;
+  }
+  for(const a of w.animals){
+    if(--a.t<=0){
+      a.t=10+Math.random()*30|0;
+      const dx=(Math.random()*3|0)-1, dy=(Math.random()*3|0)-1;
+      const nx=a.x+dx, ny=a.y+dy;
+      if(nx>=0&&ny>=0&&nx<N&&ny<N&&w.type[ny*N+nx]===a.on){a.x=nx;a.y=ny;}
+    }
+    tex[a.y*N+a.x]=a.c;
+  }
+}
+
+// ---------- камера и управление ----------
+let yaw=0, pitch=.6, spin=.4, zoom=1, target=null, dragging=false, lx=0, ly=0, sx=0;
+function go(d){ if(target===null){target=(cur+d+worlds.length)%worlds.length;} }
+document.getElementById('prev').onclick=()=>go(-1);
+document.getElementById('next').onclick=()=>go(1);
+cv.addEventListener('pointerdown',e=>{dragging=true;lx=sx=e.clientX;ly=e.clientY;});
+addEventListener('pointermove',e=>{
+  if(!dragging)return;
+  yaw+=(e.clientX-lx)*.01;
+  pitch=Math.max(-.2,Math.min(1.4,pitch+(e.clientY-ly)*.01));
+  lx=e.clientX;ly=e.clientY;
+});
+addEventListener('pointerup',e=>{
+  dragging=false;
+  const dx=e.clientX-sx;
+  if(Math.abs(dx)>innerWidth*.35)go(dx<0?1:-1); // длинный свайп = смена мира
+});
+
+// ---------- рендер (ray casting по кубу) ----------
+const L=(()=>{const v=[-.5,.8,-.6],l=Math.hypot(...v);return v.map(a=>a/l)})();
+
+function render(time){
+  // фон и звёзды
+  for(let i=0;i<buf.length;i+=4){buf[i]=4;buf[i+1]=2;buf[i+2]=16;buf[i+3]=255;}
+  for(const s of stars){
+    const b=(150+105*Math.sin(time*2+s.p))*(0.4+s.b*.6)|0, o=(s.y*W+s.x)*4;
+    buf[o]=buf[o+1]=buf[o+2]=b;
+  }
+  const w=worlds[cur]; updateTop(w,time);
+  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+  const scale=Math.min(W,H)*.22*zoom;
+  if(scale<1)return;
+  // направление луча (ортографическая камера) в локальных координатах
+  // l = Ry(-yaw) * Rx(-pitch) * w
+  const toLocal=(x,y,z)=>{
+    const y1=y*cp+z*sp, z1=-y*sp+z*cp;
+    return [x*cy-z1*sy, y1, x*sy+z1*cy];
+  };
+  const toWorld=(x,y,z)=>{
+    const x1=x*cy+z*sy, z1=-x*sy+z*cy;
+    return [x1, y*cp-z1*sp, y*sp+z1*cp];
+  };
+  const d=toLocal(0,0,1);
+  const side=w.side;
+  for(let py=0;py<H;py++){
+    for(let px=0;px<W;px++){
+      const wx=(px-W/2)/scale, wy=-(py-H/2)/scale;
+      if(wx*wx+wy*wy>3.2)continue;
+      const o=toLocal(wx,wy,-5);
+      let tmin=-1e9,tmax=1e9,ax=-1;
+      for(let a=0;a<3;a++){
+        if(Math.abs(d[a])<1e-9){if(o[a]<-1||o[a]>1){tmin=1e9;break;}continue;}
+        let t1=(-1-o[a])/d[a],t2=(1-o[a])/d[a];
+        if(t1>t2){const t=t1;t1=t2;t2=t;}
+        if(t1>tmin){tmin=t1;ax=a;}
+        if(t2<tmax)tmax=t2;
+      }
+      if(tmin>tmax||ax<0)continue;
+      const p=[o[0]+d[0]*tmin,o[1]+d[1]*tmin,o[2]+d[2]*tmin];
+      const sg=p[ax]>0?1:-1;
+      const nrm=[0,0,0];nrm[ax]=sg;
+      let col;
+      if(ax===1&&sg>0){ // верхняя грань — ландшафт
+        const u=Math.min(N-1,(p[0]+1)/2*N|0), v=Math.min(N-1,(p[2]+1)/2*N|0);
+        col=tex[v*N+u];
+      } else if(ax===1){ col=side[2]; }
+      else { // боковые грани — слои грунта
+        const h=Math.min(N-1,(1-p[1])/2*N|0);
+        const u=Math.min(N-1,((ax===0?p[2]:p[0])+1)/2*N|0);
+        const r=hash(u,h,w.seed+5);
+        col=h<2?side[0]:h<N*.45+r*3?side[1]:side[2];
+        const k=.85+r*.15; col=[col[0]*k,col[1]*k,col[2]*k];
+      }
+      const nw=toWorld(...nrm);
+      const lit=.45+.55*Math.max(0,nw[0]*L[0]+nw[1]*L[1]-nw[2]*L[2]);
+      const i=(py*W+px)*4;
+      buf[i]=col[0]*lit;buf[i+1]=col[1]*lit;buf[i+2]=col[2]*lit;
+    }
+  }
+}
+
+// ---------- цикл ----------
+let last=performance.now(), phase=0;
+function loop(now){
+  const dt=Math.min(.05,(now-last)/1000); last=now; const time=now/1000;
+  if(target!==null){
+    if(phase===0){ zoom-=dt*3; yaw+=dt*8; if(zoom<=0){zoom=0;cur=target;phase=1;} }
+    else { zoom+=dt*3; yaw+=dt*8; if(zoom>=1){zoom=1;phase=0;target=null;} }
+  } else if(!dragging) yaw+=spin*dt;
+  render(time);
+  ctx.putImageData(img,0,0);
+  document.getElementById('name').textContent=worlds[cur].name;
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
